@@ -3,10 +3,10 @@
  *
  * gNB sensing tracer — delay-Doppler viewer.
  *
- * Subscribes to GNB_PHY_SRS_LS_ESTIMATE (per-UE, per-(antenna,port)
- * SRS least-squares channel estimate in frequency domain), buffers
- * M consecutive captures per (rnti, antenna, port), and computes
- * the 2D transform:
+ * Subscribes to GNB_PHY_UL_FREQ_CHANNEL_ESTIMATE (per-UE,
+ * per-(antenna,port) SRS frequency-domain channel estimate),
+ * buffers M consecutive captures per (rnti, antenna, port), and
+ * computes the 2D transform:
  *
  *   h(tau, nu) = FFT_m { IFFT_k { H(k, m) } }
  *
@@ -319,9 +319,9 @@ static void process_block(sensing_data *d, sensing_ue *u)
 /* event handler                                                     */
 /* ---------------------------------------------------------------- */
 
-/* event layout for GNB_PHY_SRS_LS_ESTIMATE:
- *   int,gNB_ID : int,rnti : int,frame : int,slot : int,antenna :
- *   int,port : buffer,chest_ls
+/* event layout for GNB_PHY_UL_FREQ_CHANNEL_ESTIMATE:
+ *   int,gNB_ID : int,rnti : int,frame : int,subframe : int,antenna :
+ *   int,port : buffer,chest_f
  *
  * We resolve argument positions from the database format rather
  * than hard-coding indexes.
@@ -338,10 +338,10 @@ static void resolve_arg_positions(void *database, char *event_name, arg_pos *p)
   for (int i = 0; i < f.count; i++) {
     if (!strcmp(f.name[i], "rnti"))     p->rnti_arg  = i;
     if (!strcmp(f.name[i], "frame"))    p->frame_arg = i;
-    if (!strcmp(f.name[i], "slot"))     p->slot_arg  = i;
+    if (!strcmp(f.name[i], "subframe")) p->slot_arg  = i;
     if (!strcmp(f.name[i], "antenna"))  p->ant_arg   = i;
     if (!strcmp(f.name[i], "port"))     p->port_arg  = i;
-    if (!strcmp(f.name[i], "chest_ls")) p->buf_arg   = i;
+    if (!strcmp(f.name[i], "chest_f"))  p->buf_arg   = i;
   }
   if (p->rnti_arg < 0 || p->frame_arg < 0 || p->slot_arg < 0 ||
       p->ant_arg  < 0 || p->port_arg  < 0 || p->buf_arg  < 0) {
@@ -529,9 +529,9 @@ int main(int n, char **v)
   is_on = calloc(number_of_events, sizeof(int));
   if (!is_on) abort();
 
-  on_off(database, "GNB_PHY_SRS_LS_ESTIMATE", is_on, 1);
+  on_off(database, "GNB_PHY_UL_FREQ_CHANNEL_ESTIMATE", is_on, 1);
 
-  resolve_arg_positions(database, "GNB_PHY_SRS_LS_ESTIMATE", &g_pos);
+  resolve_arg_positions(database, "GNB_PHY_UL_FREQ_CHANNEL_ESTIMATE", &g_pos);
 
   memset(&sd, 0, sizeof(sd));
   memset(&sg, 0, sizeof(sg));
@@ -547,7 +547,7 @@ int main(int n, char **v)
   sd.h = h;
 
   g_data = &sd;
-  register_handler_function(h, event_id_from_name(database, "GNB_PHY_SRS_LS_ESTIMATE"),
+  register_handler_function(h, event_id_from_name(database, "GNB_PHY_UL_FREQ_CHANNEL_ESTIMATE"),
                             srs_handler, NULL);
 
   sd.g = gui_init();
