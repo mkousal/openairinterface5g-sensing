@@ -181,7 +181,7 @@ struct image_widget {
 /*                             events                                    */
 /*************************************************************************/
 
-typedef void event;
+typedef void gui_event;
 
 enum event_type {
   DIRTY, REPACK

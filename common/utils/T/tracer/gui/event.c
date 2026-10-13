@@ -65,7 +65,7 @@ static int events_equal(struct event *e1, struct event *e2)
 /*                         sending events                        */
 /*****************************************************************/
 
-static event *new_event_repack(int id)
+static gui_event *new_event_repack(int id)
 {
   struct repack_event *ret;
   ret = calloc(1, sizeof(struct repack_event));
@@ -74,7 +74,7 @@ static event *new_event_repack(int id)
   return ret;
 }
 
-static event *new_event_dirty(int id)
+static gui_event *new_event_dirty(int id)
 {
   struct dirty_event *ret;
   ret = calloc(1, sizeof(struct dirty_event));

@@ -12,7 +12,7 @@ XLIBS=-lX11 -lpng -lXft
 
 all: record replay extract_config textlog enb ue vcd macpdu2wireshark \
      extract_input_subframe extract_output_subframe to_vcd extract multi \
-     gnb t_tracer_app_gnb t_tracer_app_ue gnb_mac csv
+     gnb t_tracer_app_gnb t_tracer_app_ue gnb_mac csv gnb_sensing
 
 record: utils.o record.o database.o configuration.o
 	$(CC) $(CFLAGS) -o record $^ $(LIBS)
@@ -84,6 +84,10 @@ gnb_mac: gnb_mac.o gui/gui.a view/view.a logger/logger.a filter/filter.a \
          utils.o database.o configuration.o handler.o event.o
 	$(CC) $(CFLAGS) -o gnb_mac $^ $(LIBS) $(XLIBS)
 
+gnb_sensing: gnb_sensing.o gui/gui.a utils.o database.o configuration.o \
+             handler.o event.o
+	$(CC) $(CFLAGS) -o gnb_sensing $^ $(LIBS) $(XLIBS) -lfftw3f
+
 csv: csv.o database.o utils.o handler.o event.o configuration.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LIBS)
 
@@ -116,7 +120,7 @@ clean:
 	rm -f *.o core tracer_remote textlog enb ue vcd record record_db replay
 	rm -f extract_config macpdu2wireshark extract_input_subframe
 	rm -f extract_output_subframe to_vcd extract multi gnb
-	rm -f t_tracer_app_gnb t_tracer_app_ue gnb_mac csv
+	rm -f t_tracer_app_gnb t_tracer_app_ue gnb_mac csv gnb_sensing
 	cd gui && $(MAKE) clean
 	cd view && $(MAKE) clean
 	cd logger && $(MAKE) clean
