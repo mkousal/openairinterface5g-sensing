@@ -39,7 +39,7 @@
 
 /* buffer geometry, kept small for the sketch — tune as needed */
 #define SENS_K_MAX  3276   /* max subcarriers we accept (273 RB * 12) */
-#define SENS_M      128    /* slow-time captures per FFT */
+#define SENS_M      32     /* slow-time captures per FFT */
 #define MAX_UES     16     /* number of distinct RNTIs we track */
 
 /* dynamic range of the heatmap, in dB */
@@ -308,13 +308,11 @@ static void process_block(sensing_data *d, sensing_ue *u)
     d->db[i] = 10.f * log10f(re * re + im * im + eps);
   }
 
-  /* only paint if this UE is the selected one */
-  if (pthread_mutex_lock(&d->lock)) abort();
+  /* only paint if this UE is the selected one — caller holds d->lock */
   if (&d->ues[d->current] == u) {
     heatmap_set_block(d->g, d->ug->heatmap, d->db, K, SENS_M,
                       DB_FLOOR, DB_CEIL);
   }
-  if (pthread_mutex_unlock(&d->lock)) abort();
 }
 
 /* ---------------------------------------------------------------- */
