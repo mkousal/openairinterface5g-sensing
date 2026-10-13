@@ -174,6 +174,8 @@ static void heatmap_set_block(gui *_gui, widget *_w,
 
 typedef struct {
   widget *heatmap;
+  widget *chan_plot;
+  int     chan_plot_id;
   widget *current_ue_label;
   widget *prev_ue_button;
   widget *next_ue_button;
@@ -199,6 +201,13 @@ typedef struct {
   int           plan_K;           /* K the plans were built for     */
   fftwf_complex *work;            /* K * M scratch                  */
   float         *db;              /* K * M magnitude-dB output      */
+
+  /* debug / scratch for channel-response plot                       */
+  unsigned long ev_count;         /* events handled                 */
+  unsigned long blk_count;        /* delay-Doppler blocks rendered  */
+  float         *chan_x;          /* subcarrier axis (0..K-1)       */
+  float         *chan_y;          /* magnitude dB per subcarrier    */
+  int            chan_K;          /* size of chan_x/chan_y          */
 } sensing_data;
 
 /* ---------------------------------------------------------------- */
@@ -367,17 +376,36 @@ static void srs_handler(void *unused, event e)
   int port  = e.e[g_pos.port_arg].i;
 
   event_arg buf = e.e[g_pos.buf_arg];
-  int K = buf.bsize / (int)sizeof(int32_t);    /* chest_ls is I/Q int32   */
-  if (K <= 0 || K > SENS_K_MAX) return;
+  int K = buf.bsize / (int)sizeof(int32_t);    /* chest_f is I/Q int32    */
+
+  d->ev_count++;
+  if (d->ev_count <= 5 || (d->ev_count % 100) == 0) {
+    fprintf(stderr,
+            "[sensing] ev=%lu rnti=%d frame=%d slot=%d ant=%d port=%d bsize=%d K=%d\n",
+            d->ev_count, rnti, frame, slot, ant, port, buf.bsize, K);
+  }
+
+  if (K <= 0 || K > SENS_K_MAX) {
+    if (d->ev_count <= 20)
+      fprintf(stderr, "[sensing] dropping event, K=%d out of range\n", K);
+    return;
+  }
 
   sensing_ue *u = lookup_ue(d, rnti, ant, port, K);
-  if (u == NULL) return;
+  if (u == NULL) {
+    fprintf(stderr, "[sensing] no free UE slot for rnti=%d ant=%d port=%d K=%d\n",
+            rnti, ant, port, K);
+    return;
+  }
 
   /* drop data if a slot was skipped (uneven slow-time sampling) */
   if (u->last_frame >= 0) {
     int df = frame - u->last_frame;
     int ds = slot  - u->last_slot;
     if (df < 0 || df > 1 || (df == 0 && ds <= 0) || (df == 0 && ds > 20)) {
+      if (u->filled > 0)
+        fprintf(stderr, "[sensing] gap rnti=%d frame=%d slot=%d (was %d/%d) — reset fill=%d\n",
+                rnti, frame, slot, u->last_frame, u->last_slot, u->filled);
       u->filled = 0;
     }
   }
@@ -393,8 +421,32 @@ static void srs_handler(void *unused, event e)
   }
   u->filled++;
 
+  /* live channel-response plot for the displayed UE */
+  if (d->ug->chan_plot != NULL && &d->ues[d->current] == u) {
+    if (d->chan_K != K) {
+      free(d->chan_x); free(d->chan_y);
+      d->chan_x = malloc(sizeof(float) * K);
+      d->chan_y = malloc(sizeof(float) * K);
+      if (!d->chan_x || !d->chan_y) abort();
+      for (int k = 0; k < K; k++) d->chan_x[k] = (float)k;
+      d->chan_K = K;
+      xy_plot_set_range(d->g, d->ug->chan_plot, 0, (float)(K - 1), -20, 100);
+    }
+    const float eps = 1e-6f;
+    for (int k = 0; k < K; k++) {
+      float re = (float)(int16_t)(src[k] & 0xffff);
+      float im = (float)(int16_t)(src[k] >> 16);
+      d->chan_y[k] = 20.f * log10f(sqrtf(re * re + im * im) + eps);
+    }
+    xy_plot_set_points(d->g, d->ug->chan_plot, d->ug->chan_plot_id,
+                       K, d->chan_x, d->chan_y);
+  }
+
   if (u->filled >= SENS_M) {
     u->filled = 0;
+    d->blk_count++;
+    fprintf(stderr, "[sensing] block #%lu ready rnti=%d ant=%d port=%d K=%d\n",
+            d->blk_count, u->rnti, u->antenna, u->port, u->K);
     process_block(d, u);
   }
 }
@@ -414,6 +466,12 @@ static void set_current_label(sensing_data *d)
              d->ues[d->current].antenna,
              d->ues[d->current].port);
     label_set_text(d->g, d->ug->current_ue_label, s);
+  }
+  /* drop the previous UE's channel plot; it will be redrawn on the
+   * next event from the newly selected UE */
+  if (d->ug->chan_plot != NULL && d->ug->chan_plot_id >= 0) {
+    float z = 0;
+    xy_plot_set_points(d->g, d->ug->chan_plot, d->ug->chan_plot_id, 0, &z, &z);
   }
 }
 
@@ -446,7 +504,7 @@ static void build_gui(sensing_data *d)
   gui *g = d->g;
   sensing_gui *ug = d->ug;
 
-  widget *win = new_toplevel_window(g, 900, 540, "gNB sensing");
+  widget *win = new_toplevel_window(g, 900, 720, "gNB sensing");
   widget *top = new_container(g, VERTICAL);
   widget_add_child(g, win, top, -1);
 
@@ -467,6 +525,12 @@ static void build_gui(sensing_data *d)
   label_set_clickable(g, next, 1);
   ug->next_ue_button = next;
   widget_add_child(g, row, next, -1);
+
+  /* per-capture SRS channel magnitude, x=subcarrier, y=dB */
+  ug->chan_plot = new_xy_plot(g, 880, 180, "SRS channel (dB)", 50);
+  ug->chan_plot_id = xy_plot_new_plot(g, ug->chan_plot, new_color(g, "#0c0c72"));
+  xy_plot_set_range(g, ug->chan_plot, 0, 1024, -20, 100);
+  widget_add_child(g, top, ug->chan_plot, -1);
 
   /* heatmap: x=Doppler, y=delay */
   ug->heatmap = new_heatmap(g, 880, 480);
@@ -535,6 +599,7 @@ int main(int n, char **v)
 
   memset(&sd, 0, sizeof(sd));
   memset(&sg, 0, sizeof(sg));
+  sg.chan_plot_id = -1;
   sd.socket = -1;
   sd.is_on  = is_on;
   sd.nevents = number_of_events;
