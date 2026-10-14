@@ -368,8 +368,18 @@ class SensingApp:
                       f"  period={per}", flush=True)
                 # delay-Doppler over the occupied band only:
                 #   IFFT along k (size = occ_K) then FFT along m (size = M).
-                delay = np.fft.ifft(u.h_buf, axis=1)         # (M, occ_K)
-                dd = np.fft.fft(delay, axis=0)               # (M, occ_K)
+                #
+                # Before the slow-time FFT we subtract the per-subcarrier
+                # mean -- this is the classic "clutter rejection" / DC
+                # blocker that removes the LOS path and any stationary
+                # reflector at zero Doppler. Without it the strong static
+                # component dominates the slow-time FFT and the moving
+                # peaks (which is what we usually care about) get buried
+                # in side lobes.
+                h_block = u.h_buf - u.h_buf.mean(axis=0, keepdims=True)
+
+                delay = np.fft.ifft(h_block, axis=1)          # (M, occ_K)
+                dd = np.fft.fft(delay, axis=0)                # (M, occ_K)
                 dd = np.fft.fftshift(dd, axes=0)
                 mag = np.abs(dd).astype(np.float32) ** 2
                 block_db = 10.0 * np.log10(mag + 1e-12)
@@ -506,19 +516,17 @@ class SensingApp:
                 if hi <= lo:
                     hi = lo + 1.0
                 dd_norm.vmin, dd_norm.vmax = lo, hi
+                n_tau = dd.shape[0]
                 if axes is not None:
                     tap_s, dl, dr = axes
-                    # y runs from tap 0 at the bottom to K-1 at the top,
-                    # x from min to max Doppler Hz
+                    # delay axis: tap 0 at the bottom (y=0), tap n_tau-1 at the top
+                    y_min_us = -0.5 * tap_s * 1e6
+                    y_max_us = (n_tau - 0.5) * tap_s * 1e6
                     if dl is not None:
-                        dd_img.set_extent((dl, dr,
-                                           -0.5 * tap_s * 1e6,
-                                           (dd.shape[0] - 0.5) * tap_s * 1e6))
+                        dd_img.set_extent((dl, dr, y_min_us, y_max_us))
                     else:
-                        # Doppler period not yet measured: show bin indices
                         dd_img.set_extent((-dd.shape[1] / 2, dd.shape[1] / 2,
-                                           -0.5 * tap_s * 1e6,
-                                           (dd.shape[0] - 0.5) * tap_s * 1e6))
+                                           y_min_us, y_max_us))
                 else:
                     dd_img.set_extent((-0.5, dd.shape[1] - 0.5,
                                        -0.5, dd.shape[0] - 0.5))
