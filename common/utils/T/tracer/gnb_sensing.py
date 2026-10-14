@@ -208,7 +208,7 @@ class TClient:
 
 class UeState:
     __slots__ = ("rnti", "ant", "port", "K", "filled", "h_buf",
-                 "last_frame", "last_slot")
+                 "last_frame", "last_slot", "srs_period_f")
 
     def __init__(self, rnti, ant, port, K, M):
         self.rnti = rnti
@@ -219,6 +219,7 @@ class UeState:
         self.h_buf = np.zeros((M, K), dtype=np.complex64)
         self.last_frame = -1
         self.last_slot = -1
+        self.srs_period_f = 0   # frames between consecutive SRS captures (0 = unknown)
 
     def label(self):
         return f"rnti={self.rnti} ant={self.ant} port={self.port} K={self.K}"
@@ -229,9 +230,10 @@ class UeState:
 # --------------------------------------------------------------------------
 
 class SensingApp:
-    def __init__(self, M, db_fmt):
+    def __init__(self, M, db_fmt, scs_hz):
         self.M = M
         self.fmt = db_fmt
+        self.scs_hz = scs_hz                    # subcarrier spacing for delay axis
         self.lock = threading.Lock()
         self.ues = {}            # (rnti, ant, port, K) -> UeState
         self.ue_order = []       # stable key order for prev/next cycling
@@ -239,9 +241,10 @@ class SensingApp:
         self.ev_count = 0
         self.blk_count = 0
 
-        # latest block + latest channel snapshot for the selected UE
+        # latest block + axes for the selected UE (None until first block)
         self.latest_dd = None    # (K, M) float dB
         self.latest_chan = None  # (K,) float dB
+        self.latest_axes = None  # (delay_tap_s, doppler_hz_left, doppler_hz_right)
         self.dirty = threading.Event()
 
         self.stop = threading.Event()
@@ -309,6 +312,8 @@ class SensingApp:
                               f" slot={slot} (was {u.last_frame}/{u.last_slot})"
                               f" reset fill={u.filled}", flush=True)
                     u.filled = 0
+                elif df >= 1:
+                    u.srs_period_f = df
             u.last_frame = frame
             u.last_slot = slot
 
@@ -326,8 +331,10 @@ class SensingApp:
             if u.filled >= self.M:
                 u.filled = 0
                 self.blk_count += 1
-                print(f"[sensing] block #{self.blk_count} ready {u.label()}",
-                      flush=True)
+                per = (f"{u.srs_period_f}f ({u.srs_period_f * 10:.0f} ms)"
+                       if u.srs_period_f > 0 else "unknown")
+                print(f"[sensing] block #{self.blk_count} ready {u.label()}"
+                      f"  period={per}", flush=True)
                 # delay-Doppler: IFFT along k then FFT along m, fftshift on m
                 delay = np.fft.ifft(u.h_buf, axis=1)         # (M, K)
                 dd = np.fft.fft(delay, axis=0)               # (M, K)
@@ -338,6 +345,15 @@ class SensingApp:
                 if cof is not None and self.ues.get(cof) is u:
                     # transpose -> (K, M): rows = delay, cols = Doppler
                     self.latest_dd = block_db.T.copy()
+                    # physical axis scales
+                    delay_tap_s = 1.0 / (u.K * self.scs_hz)
+                    if u.srs_period_f > 0:
+                        t_cap_s = u.srs_period_f * 0.010        # frames -> seconds (10 ms per frame)
+                        dop_span = 1.0 / t_cap_s                  # Hz, full unambiguous width
+                        dop_left, dop_right = -dop_span / 2.0, +dop_span / 2.0
+                        self.latest_axes = (delay_tap_s, dop_left, dop_right)
+                    else:
+                        self.latest_axes = (delay_tap_s, None, None)
             self.dirty.set()
 
     def current_ue_key(self):
@@ -357,6 +373,7 @@ class SensingApp:
             self.current_idx = (self.current_idx + step) % len(self.ue_order)
             self.latest_dd = None
             self.latest_chan = None
+            self.latest_axes = None
             old = self.ue_order[old_idx]
             new = self.ue_order[self.current_idx]
             print(f"[sensing] cycle step={step:+d}  "
@@ -399,8 +416,8 @@ class SensingApp:
             np.full((16, self.M), DB_FLOOR, dtype=np.float32),
             aspect="auto", origin="lower", cmap="viridis",
             norm=Normalize(DB_FLOOR, DB_CEIL))
-        ax_dd.set_xlabel("Doppler bin")
-        ax_dd.set_ylabel("delay tap")
+        ax_dd.set_xlabel("Doppler (Hz)")
+        ax_dd.set_ylabel("delay (µs)")
         dd_title = ax_dd.set_title("delay-Doppler — [no UE]")
         fig.colorbar(dd_img, ax=ax_dd, label="dB")
 
@@ -435,6 +452,7 @@ class SensingApp:
                     f"rnti={cof[0]} ant={cof[1]} port={cof[2]} K={cof[3]}"
                 chan = None if self.latest_chan is None else self.latest_chan.copy()
                 dd = None if self.latest_dd is None else self.latest_dd.copy()
+                axes = self.latest_axes
 
             chan_title.set_text(f"SRS channel — {lbl}")
             if chan is not None:
@@ -446,8 +464,22 @@ class SensingApp:
             dd_title.set_text(f"delay-Doppler — {lbl}")
             if dd is not None:
                 dd_img.set_data(dd)
-                dd_img.set_extent((-0.5, dd.shape[1] - 0.5,
-                                   -0.5, dd.shape[0] - 0.5))
+                if axes is not None:
+                    tap_s, dl, dr = axes
+                    # y runs from tap 0 at the bottom to K-1 at the top,
+                    # x from min to max Doppler Hz
+                    if dl is not None:
+                        dd_img.set_extent((dl, dr,
+                                           -0.5 * tap_s * 1e6,
+                                           (dd.shape[0] - 0.5) * tap_s * 1e6))
+                    else:
+                        # Doppler period not yet measured: show bin indices
+                        dd_img.set_extent((-dd.shape[1] / 2, dd.shape[1] / 2,
+                                           -0.5 * tap_s * 1e6,
+                                           (dd.shape[0] - 0.5) * tap_s * 1e6))
+                else:
+                    dd_img.set_extent((-0.5, dd.shape[1] - 0.5,
+                                       -0.5, dd.shape[0] - 0.5))
             return chan_line, dd_img, chan_title, dd_title
 
         from matplotlib.animation import FuncAnimation
@@ -470,6 +502,10 @@ def main():
     ap.add_argument("-p", "--port", type=int, default=2021)
     ap.add_argument("-M", "--slow-time", type=int, default=DEFAULT_M,
                     help="captures per delay-Doppler block")
+    ap.add_argument("--scs-hz", type=float, default=30000.0,
+                    help="subcarrier spacing in Hz used to convert delay taps "
+                         "to seconds (default 30 kHz; use 15000 for LTE-"
+                         "like numerology, 60000/120000 for higher-µ NR)")
     ap.add_argument("--ue-dump-period", type=float, default=5.0,
                     help="seconds between periodic UE-list prints (0 disables)")
     args = ap.parse_args()
@@ -490,7 +526,7 @@ def main():
               file=sys.stderr)
         return 1
 
-    app = SensingApp(M=args.slow_time, db_fmt=fmt)
+    app = SensingApp(M=args.slow_time, db_fmt=fmt, scs_hz=args.scs_hz)
     client = TClient(args.host, args.port, eid, total)
 
     seen_types = {}
