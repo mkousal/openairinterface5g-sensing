@@ -147,6 +147,10 @@ class TClient:
             try:
                 print(f"connecting to {self.host}:{self.port}", flush=True)
                 s = socket.create_connection((self.host, self.port), timeout=5)
+                # create_connection leaves the timeout on the socket, which
+                # would make every recv() raise socket.timeout after 5s of
+                # radio silence — restore plain blocking mode for streaming
+                s.settimeout(None)
                 # handshake: byte 1, int32 N_ids, int32 is_on[N_ids]
                 s.sendall(struct.pack("<B", 1))
                 s.sendall(struct.pack("<i", self.total_ids))
@@ -173,6 +177,14 @@ class TClient:
                 if etype in (-1, -2):  # config chunks, skip
                     continue
                 yield etype, body
+            except socket.timeout as e:
+                print(f"socket timeout (should not happen after settimeout(None)): {e}; reconnecting",
+                      flush=True)
+                try:
+                    self.sock.close()
+                except OSError:
+                    pass
+                self.sock = None
             except (ConnectionError, OSError) as e:
                 print(f"socket error: {e}; reconnecting", flush=True)
                 try:
