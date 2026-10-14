@@ -207,21 +207,32 @@ class TClient:
 # --------------------------------------------------------------------------
 
 class UeState:
-    __slots__ = ("rnti", "ant", "port", "K", "filled", "h_buf",
-                 "last_frame", "last_slot", "srs_period_f")
+    __slots__ = ("rnti", "ant", "port", "K", "M", "filled", "h_buf",
+                 "last_frame", "last_slot", "srs_period_f",
+                 "occ_lo", "occ_hi")
 
     def __init__(self, rnti, ant, port, K, M):
         self.rnti = rnti
         self.ant = ant
         self.port = port
-        self.K = K
+        self.K = K                  # raw buffer width (FFT size of the carrier)
+        self.M = M
         self.filled = 0
-        self.h_buf = np.zeros((M, K), dtype=np.complex64)
+        self.h_buf = None           # allocated on first event with cropped width
         self.last_frame = -1
         self.last_slot = -1
-        self.srs_period_f = 0   # frames between consecutive SRS captures (0 = unknown)
+        self.srs_period_f = 0       # frames between consecutive SRS captures (0 = unknown)
+        self.occ_lo = -1            # first occupied subcarrier in the raw buffer
+        self.occ_hi = -1            # one past the last occupied subcarrier
+
+    def occ_k(self):
+        """Width of the occupied subcarrier band, or 0 if not yet detected."""
+        return self.occ_hi - self.occ_lo if self.occ_lo >= 0 else 0
 
     def label(self):
+        if self.occ_lo >= 0:
+            return (f"rnti={self.rnti} ant={self.ant} port={self.port}"
+                    f" occ=[{self.occ_lo}..{self.occ_hi - 1}]/{self.K}")
         return f"rnti={self.rnti} ant={self.ant} port={self.port} K={self.K}"
 
 
@@ -319,34 +330,55 @@ class SensingApp:
 
             # c16_t { int16 r; int16 i; } little-endian -> complex64
             iq = np.frombuffer(buf, dtype="<i2", count=K * 2).astype(np.float32)
-            u.h_buf[u.filled, :] = iq[0::2] + 1j * iq[1::2]
+            h_full = iq[0::2] + 1j * iq[1::2]                # (K,)
+
+            # Detect occupied subcarrier band on first event for this UE.
+            # Outside the SRS allocation the PHY leaves the buffer zero, so
+            # any non-zero magnitude marks occupancy. Crop everything else
+            # so the IFFT / FFT only sees the live band -- this is what the
+            # user means by "calculate the delay-Doppler domain from the
+            # occupied subcarriers".
+            if u.occ_lo < 0:
+                nz = np.flatnonzero(np.abs(h_full) > 0.0)
+                if nz.size == 0:
+                    # nothing transmitted (silence frame?), skip event
+                    return
+                u.occ_lo = int(nz[0])
+                u.occ_hi = int(nz[-1]) + 1
+                u.h_buf = np.zeros((u.M, u.occ_k()), dtype=np.complex64)
+                print(f"[sensing] UE {u.rnti}: occupied band"
+                      f" [{u.occ_lo}..{u.occ_hi - 1}] of {u.K}"
+                      f" ({u.occ_k()} active subcarriers)", flush=True)
+
+            u.h_buf[u.filled, :] = h_full[u.occ_lo:u.occ_hi]
             u.filled += 1
 
             cof = self.current_ue_key()
             if cof is not None and self.ues.get(cof) is u:
-                # live magnitude of latest capture
+                # live magnitude of latest capture (already cropped)
                 mag = np.abs(u.h_buf[u.filled - 1, :]) + 1e-6
                 self.latest_chan = 20.0 * np.log10(mag)
 
-            if u.filled >= self.M:
+            if u.filled >= u.M:
                 u.filled = 0
                 self.blk_count += 1
                 per = (f"{u.srs_period_f}f ({u.srs_period_f * 10:.0f} ms)"
                        if u.srs_period_f > 0 else "unknown")
                 print(f"[sensing] block #{self.blk_count} ready {u.label()}"
                       f"  period={per}", flush=True)
-                # delay-Doppler: IFFT along k then FFT along m, fftshift on m
-                delay = np.fft.ifft(u.h_buf, axis=1)         # (M, K)
-                dd = np.fft.fft(delay, axis=0)               # (M, K)
+                # delay-Doppler over the occupied band only:
+                #   IFFT along k (size = occ_K) then FFT along m (size = M).
+                delay = np.fft.ifft(u.h_buf, axis=1)         # (M, occ_K)
+                dd = np.fft.fft(delay, axis=0)               # (M, occ_K)
                 dd = np.fft.fftshift(dd, axes=0)
                 mag = np.abs(dd).astype(np.float32) ** 2
                 block_db = 10.0 * np.log10(mag + 1e-12)
                 cof = self.current_ue_key()
                 if cof is not None and self.ues.get(cof) is u:
-                    # transpose -> (K, M): rows = delay, cols = Doppler
+                    # transpose -> (occ_K, M): rows = delay, cols = Doppler
                     self.latest_dd = block_db.T.copy()
                     # physical axis scales
-                    delay_tap_s = 1.0 / (u.K * self.scs_hz)
+                    delay_tap_s = 1.0 / (u.occ_k() * self.scs_hz)
                     if u.srs_period_f > 0:
                         t_cap_s = u.srs_period_f * 0.010        # frames -> seconds (10 ms per frame)
                         dop_span = 1.0 / t_cap_s                  # Hz, full unambiguous width
@@ -408,14 +440,14 @@ class SensingApp:
         chan_line, = ax_chan.plot([], [], lw=0.7, color="#0c0c72")
         ax_chan.set_xlabel("subcarrier")
         ax_chan.set_ylabel("|H| dB")
-        ax_chan.set_ylim(-20, 100)
         ax_chan.grid(True, alpha=0.3)
         chan_title = ax_chan.set_title("SRS channel — [no UE]")
 
+        dd_norm = Normalize(DB_FLOOR, DB_CEIL)
         dd_img = ax_dd.imshow(
             np.full((16, self.M), DB_FLOOR, dtype=np.float32),
             aspect="auto", origin="lower", cmap="viridis",
-            norm=Normalize(DB_FLOOR, DB_CEIL))
+            norm=dd_norm)
         ax_dd.set_xlabel("Doppler (Hz)")
         ax_dd.set_ylabel("delay (µs)")
         dd_title = ax_dd.set_title("delay-Doppler — [no UE]")
@@ -457,13 +489,23 @@ class SensingApp:
             chan_title.set_text(f"SRS channel — {lbl}")
             if chan is not None:
                 chan_line.set_data(np.arange(chan.size), chan)
-                ax_chan.set_xlim(0, chan.size - 1)
+                ax_chan.relim()
+                ax_chan.autoscale_view(scalex=True, scaley=True)
             else:
                 chan_line.set_data([], [])
+                ax_chan.relim()
+                ax_chan.autoscale_view(scalex=True, scaley=True)
 
             dd_title.set_text(f"delay-Doppler — {lbl}")
             if dd is not None:
                 dd_img.set_data(dd)
+                # autoscale the colormap to the data range with a small
+                # headroom so a single strong peak doesn't blow up the scale
+                lo = float(np.percentile(dd, 1.0))
+                hi = float(np.percentile(dd, 99.9))
+                if hi <= lo:
+                    hi = lo + 1.0
+                dd_norm.vmin, dd_norm.vmax = lo, hi
                 if axes is not None:
                     tap_s, dl, dr = axes
                     # y runs from tap 0 at the bottom to K-1 at the top,
