@@ -467,6 +467,8 @@ def main():
         return 1
     eid = name_to_id[TARGET_EVENT]
     fmt = id_to_format[eid]
+    print(f"[sensing] target '{TARGET_EVENT}' has local id {eid}; "
+          f"total ids in database: {total}", flush=True)
     need = {"rnti", "frame", "subframe", "antenna", "port", "chest_f"}
     missing = need - set(fmt.arg_names)
     if missing:
@@ -477,6 +479,9 @@ def main():
     app = SensingApp(M=args.slow_time, db_fmt=fmt)
     client = TClient(args.host, args.port, eid, total)
 
+    seen_types = {}
+    first_type_report_at = [time.time()]
+
     def rx_loop():
         for etype, body in client.events():
             if app.stop.is_set():
@@ -486,6 +491,18 @@ def main():
                     app.handle_event(body)
                 except Exception as e:
                     print(f"[sensing] handler error: {e}", flush=True)
+            else:
+                seen_types[etype] = seen_types.get(etype, 0) + 1
+                if len(seen_types) == 1 and seen_types[etype] == 1:
+                    print(f"[sensing] first non-target event arrived: etype={etype} "
+                          f"(target {TARGET_EVENT} has id {eid}); "
+                          f"body={len(body)}B", flush=True)
+                now = time.time()
+                if now - first_type_report_at[0] >= 5.0:
+                    first_type_report_at[0] = now
+                    if seen_types:
+                        print(f"[sensing] non-target etypes seen so far: "
+                              f"{sorted(seen_types.items())}", flush=True)
 
     t = threading.Thread(target=rx_loop, daemon=True)
     t.start()
