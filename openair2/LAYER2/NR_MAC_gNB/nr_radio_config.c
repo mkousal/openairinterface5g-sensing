@@ -750,6 +750,8 @@ static struct NR_SRS_Resource__resourceType__periodic *configure_periodic_srs(co
     periodic_srs->periodicityAndOffset_p.present = NR_SRS_PeriodicityAndOffset_PR_sl2560;
     periodic_srs->periodicityAndOffset_p.choice.sl2560 = offset;
   }
+  periodic_srs->periodicityAndOffset_p.present = NR_SRS_PeriodicityAndOffset_PR_sl8;
+  periodic_srs->periodicityAndOffset_p.choice.sl8 = offset;
   return periodic_srs;
 }
 
