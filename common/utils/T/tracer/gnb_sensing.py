@@ -166,14 +166,22 @@ class TClient:
 
     def events(self):
         """Generator yielding (event_id, body_bytes). Reconnects on drop."""
+        # T_defs.h enables T_SEND_TIME: every event is prefixed with
+        # struct timespec (16 bytes on x86_64: time_t tv_sec + long tv_nsec)
+        # between the outer length and the int32 event type. The outer
+        # length covers (timespec + type + args).
+        TIMESPEC_BYTES = 16
         while True:
             if self.sock is None:
                 self.connect()
             try:
-                # header: int32 length (covers the rest), int32 type
-                hdr = read_full(self.sock, 8)
-                length, etype = struct.unpack("<ii", hdr)
-                body = read_full(self.sock, length - 4)
+                hdr = read_full(self.sock, 4 + TIMESPEC_BYTES + 4)
+                length, _tv_sec, _tv_nsec, etype = struct.unpack("<iqqi", hdr)
+                body_len = length - TIMESPEC_BYTES - 4
+                if body_len < 0:
+                    raise ConnectionError(
+                        f"bad frame: length={length} too small (etype={etype})")
+                body = read_full(self.sock, body_len)
                 if etype in (-1, -2):  # config chunks, skip
                     continue
                 yield etype, body
