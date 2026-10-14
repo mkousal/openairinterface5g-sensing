@@ -291,17 +291,23 @@ class SensingApp:
                       flush=True)
                 return
 
-            # drop data on a slot gap (uneven slow-time sampling)
-            # note: same (frame, slot) is OK — multiple SRS symbols per slot
-            # or repeat firings are still distinct captures
+            # only sanity-check that time moves forward (or wraps at 1024);
+            # SRS commonly fires with a period of several frames, so a jump
+            # in df is the normal case and must NOT reset the fill counter —
+            # otherwise no block ever completes. Doppler bin spacing then
+            # reflects the actual (fixed) inter-SRS period of the config.
             if u.last_frame >= 0:
                 df = frame - u.last_frame
-                ds = slot - u.last_slot
-                if df < 0 or df > 1 or (df == 0 and ds < 0) or (df == 0 and ds > 20):
+                # frame wraps at 1024 -> treat as continuation
+                if df < -512:
+                    df += 1024
+                elif df > 512:
+                    df -= 1024
+                if df < 0:
                     if u.filled > 0:
-                        print(f"[sensing] gap rnti={rnti} frame={frame} slot={slot}"
-                              f" (was {u.last_frame}/{u.last_slot}) reset fill={u.filled}",
-                              flush=True)
+                        print(f"[sensing] time reversal rnti={rnti} frame={frame}"
+                              f" slot={slot} (was {u.last_frame}/{u.last_slot})"
+                              f" reset fill={u.filled}", flush=True)
                     u.filled = 0
             u.last_frame = frame
             u.last_slot = slot
