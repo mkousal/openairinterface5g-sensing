@@ -250,7 +250,10 @@ class SensingApp:
         u = UeState(rnti, ant, port, K, self.M)
         self.ues[key] = u
         self.ue_order.append(key)
-        print(f"[sensing] new UE slot: {u.label()}", flush=True)
+        cur = self.ue_order[self.current_idx] if self.ue_order else None
+        sel = " (selected)" if cur == key else ""
+        print(f"[sensing] new UE slot [{len(self.ue_order)-1}]: {u.label()}{sel}",
+              flush=True)
         return u
 
     def handle_event(self, body):
@@ -334,13 +337,36 @@ class SensingApp:
     def cycle_ue(self, step):
         with self.lock:
             if not self.ue_order:
+                print("[sensing] cycle ignored: no UEs tracked yet", flush=True)
                 return
+            old_idx = self.current_idx
             self.current_idx = (self.current_idx + step) % len(self.ue_order)
             self.latest_dd = None
             self.latest_chan = None
-            print(f"[sensing] selected {self.ue_order[self.current_idx]}",
+            old = self.ue_order[old_idx]
+            new = self.ue_order[self.current_idx]
+            print(f"[sensing] cycle step={step:+d}  "
+                  f"{old_idx}/{len(self.ue_order)} rnti={old[0]} ant={old[1]} port={old[2]} K={old[3]}"
+                  f"  ->  "
+                  f"{self.current_idx}/{len(self.ue_order)} rnti={new[0]} ant={new[1]} port={new[2]} K={new[3]}",
                   flush=True)
+            if len(self.ue_order) == 1:
+                print("[sensing] (only 1 UE tracked; cycle is a no-op)", flush=True)
             self.dirty.set()
+
+    def dump_ues(self, reason):
+        with self.lock:
+            cur_key = self.current_ue_key()
+            print(f"[sensing] --- UE list ({reason}) --- "
+                  f"tracked={len(self.ue_order)} current_idx={self.current_idx}",
+                  flush=True)
+            for i, k in enumerate(self.ue_order):
+                u = self.ues[k]
+                marker = "*" if k == cur_key else " "
+                print(f"[sensing]  {marker} [{i}] rnti={u.rnti:5d} ant={u.ant}"
+                      f" port={u.port} K={u.K} filled={u.filled}/{self.M}"
+                      f" last={u.last_frame}/{u.last_slot}",
+                      flush=True)
 
     def run_gui(self):
         fig, (ax_chan, ax_dd) = plt.subplots(
@@ -365,12 +391,25 @@ class SensingApp:
         fig.colorbar(dd_img, ax=ax_dd, label="dB")
 
         def on_key(ev):
+            print(f"[sensing] key pressed: {ev.key!r}", flush=True)
             if ev.key in ("n", "N", "right"):
                 self.cycle_ue(+1)
             elif ev.key in ("p", "P", "left"):
                 self.cycle_ue(-1)
+            elif ev.key in ("l", "L"):
+                self.dump_ues("manual")
 
         fig.canvas.mpl_connect("key_press_event", on_key)
+
+        # click on either axes also cycles, in case the backend or toolbar
+        # swallows key events
+        def on_click(ev):
+            if ev.inaxes in (ax_chan, ax_dd):
+                print(f"[sensing] mouse click in axes (button={ev.button}) — cycling",
+                      flush=True)
+                self.cycle_ue(+1 if ev.button != 3 else -1)
+
+        fig.canvas.mpl_connect("button_press_event", on_click)
 
         def redraw(_frame):
             if not self.dirty.is_set():
@@ -417,6 +456,8 @@ def main():
     ap.add_argument("-p", "--port", type=int, default=2021)
     ap.add_argument("-M", "--slow-time", type=int, default=DEFAULT_M,
                     help="captures per delay-Doppler block")
+    ap.add_argument("--ue-dump-period", type=float, default=5.0,
+                    help="seconds between periodic UE-list prints (0 disables)")
     args = ap.parse_args()
 
     name_to_id, id_to_format, total = parse_database(args.database)
@@ -448,6 +489,13 @@ def main():
 
     t = threading.Thread(target=rx_loop, daemon=True)
     t.start()
+
+    if args.ue_dump_period > 0:
+        def dump_loop():
+            while not app.stop.wait(args.ue_dump_period):
+                app.dump_ues("periodic")
+        threading.Thread(target=dump_loop, daemon=True).start()
+
     app.run_gui()
     return 0
 
