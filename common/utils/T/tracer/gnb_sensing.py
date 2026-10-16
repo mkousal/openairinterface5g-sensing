@@ -17,9 +17,12 @@ each time a new block is ready. Keys: 'n' / 'p' cycle the displayed UE.
 
 Usage:
     gnb_sensing.py -d <T_messages.txt> [-ip HOST] [-p PORT] [-M 32]
+                                     [--save trace.gst]
+    gnb_sensing.py -d <T_messages.txt> --replay trace.gst [--replay-speed 0]
 """
 
 import argparse
+import os
 import socket
 import struct
 import sys
@@ -42,6 +45,12 @@ DEFAULT_M = 32             # slow-time captures per FFT block
 DB_FLOOR, DB_CEIL = -60.0, 0.0
 MAX_UES = 16
 TARGET_EVENT = "GNB_PHY_UL_FREQ_CHANNEL_ESTIMATE"
+
+# every wire event is prefixed with struct timespec (x86_64: 2x int64)
+# between the outer length and the int32 event type; the outer length
+# covers timespec + type + args.  (T_defs.h enables T_SEND_TIME.)
+TIMESPEC_BYTES = 16
+TRACE_MAGIC = b"GST1"          # gnb sensing trace v1
 
 # --------------------------------------------------------------------------
 # database (T_messages.txt)
@@ -165,18 +174,16 @@ class TClient:
                 time.sleep(1)
 
     def events(self):
-        """Generator yielding (event_id, body_bytes). Reconnects on drop."""
-        # T_defs.h enables T_SEND_TIME: every event is prefixed with
-        # struct timespec (16 bytes on x86_64: time_t tv_sec + long tv_nsec)
-        # between the outer length and the int32 event type. The outer
-        # length covers (timespec + type + args).
-        TIMESPEC_BYTES = 16
+        """Generator yielding (timespec_bytes, event_id, body_bytes).
+        Reconnects on drop. timespec_bytes is the raw 16-byte time stamp
+        the tracee attached, kept unparsed so --save can store it verbatim."""
         while True:
             if self.sock is None:
                 self.connect()
             try:
                 hdr = read_full(self.sock, 4 + TIMESPEC_BYTES + 4)
-                length, _tv_sec, _tv_nsec, etype = struct.unpack("<iqqi", hdr)
+                length = struct.unpack_from("<i", hdr, 0)[0]
+                etype = struct.unpack_from("<i", hdr, 4 + TIMESPEC_BYTES)[0]
                 body_len = length - TIMESPEC_BYTES - 4
                 if body_len < 0:
                     raise ConnectionError(
@@ -184,7 +191,7 @@ class TClient:
                 body = read_full(self.sock, body_len)
                 if etype in (-1, -2):  # config chunks, skip
                     continue
-                yield etype, body
+                yield hdr[4:4 + TIMESPEC_BYTES], etype, body
             except socket.timeout as e:
                 print(f"socket timeout (should not happen after settimeout(None)): {e}; reconnecting",
                       flush=True)
@@ -200,6 +207,99 @@ class TClient:
                 except OSError:
                     pass
                 self.sock = None
+
+
+# --------------------------------------------------------------------------
+# trace recording / replay
+# --------------------------------------------------------------------------
+
+class TraceWriter:
+    """Appends decoded frames to a binary trace file.
+
+    Layout (all little-endian):
+        magic[4] = GST1
+        per frame:
+            int64 tv_sec, int64 tv_nsec   (from the tracee's T_SEND_TIME)
+            int32 etype
+            int32 body_len
+            body[body_len]
+    """
+
+    def __init__(self, path):
+        if os.path.exists(path):
+            raise FileExistsError(
+                f"trace file '{path}' already exists; pick another name"
+                f" or delete it first")
+        self.f = open(path, "wb")
+        self.path = path
+        self.count = 0
+        self.f.write(TRACE_MAGIC)
+
+    def write(self, timespec_bytes, etype, body):
+        if len(timespec_bytes) != TIMESPEC_BYTES:
+            raise ValueError(f"expected {TIMESPEC_BYTES} timespec bytes, "
+                             f"got {len(timespec_bytes)}")
+        self.f.write(timespec_bytes)
+        self.f.write(struct.pack("<ii", etype, len(body)))
+        self.f.write(body)
+        self.count += 1
+
+    def close(self):
+        self.f.close()
+        print(f"[sensing] trace saved: {self.path}  frames={self.count}",
+              flush=True)
+
+
+class TraceReplayer:
+    """Streams a saved trace back at its original cadence."""
+
+    def __init__(self, path, speed):
+        self.path = path
+        self.speed = speed     # 1.0 = real time, 0.0 = as fast as possible
+
+    def events(self):
+        """Yields (timespec_bytes, event_id, body_bytes) once, then stops."""
+        first_ts = None
+        first_wall = None
+        with open(self.path, "rb") as f:
+            magic = f.read(len(TRACE_MAGIC))
+            if magic != TRACE_MAGIC:
+                raise ValueError(
+                    f"'{self.path}' is not a {TRACE_MAGIC.decode()} trace file")
+            n_frames = 0
+            while True:
+                hdr = f.read(TIMESPEC_BYTES + 8)
+                if not hdr:
+                    break
+                if len(hdr) != TIMESPEC_BYTES + 8:
+                    raise ValueError(
+                        f"truncated frame header in {self.path} after "
+                        f"{n_frames} frames")
+                tv_sec, tv_nsec, etype, body_len = struct.unpack("<qqii", hdr)
+                body = f.read(body_len)
+                if len(body) != body_len:
+                    raise ValueError(
+                        f"truncated frame body in {self.path} on frame "
+                        f"{n_frames}")
+                if body_len > 64 * 1024 * 1024:
+                    raise ValueError(
+                        f"implausible body_len={body_len} on frame {n_frames}")
+
+                # pace against the recorded timestamps; negative gaps
+                # (out-of-order sender clock) clamp to zero
+                if first_ts is None:
+                    first_ts = (tv_sec, tv_nsec)
+                    first_wall = time.monotonic()
+                elif self.speed > 0.0:
+                    rec = (tv_sec - first_ts[0]) + (tv_nsec - first_ts[1]) * 1e-9
+                    wall_elapsed = time.monotonic() - first_wall
+                    wait = rec / self.speed - wall_elapsed
+                    if wait > 0:
+                        time.sleep(wait)
+                n_frames += 1
+                yield hdr[:TIMESPEC_BYTES], etype, body
+        print(f"[sensing] replay finished: {self.path}  frames={n_frames}",
+              flush=True)
 
 
 # --------------------------------------------------------------------------
@@ -550,6 +650,15 @@ def main():
                     help="path to T_messages.txt")
     ap.add_argument("-ip", "--host", default="127.0.0.1")
     ap.add_argument("-p", "--port", type=int, default=2021)
+    ap.add_argument("--save", metavar="FILE",
+                    help="record every decoded frame to FILE so the capture "
+                         "can be replayed later with --replay")
+    ap.add_argument("--replay", metavar="FILE",
+                    help="read frames from a previously saved trace instead of "
+                         "connecting to the live socket")
+    ap.add_argument("--replay-speed", type=float, default=1.0,
+                    help="1.0 = follow the recorded timestamps; 0 = as fast "
+                         "as possible (default 1.0)")
     ap.add_argument("-M", "--slow-time", type=int, default=DEFAULT_M,
                     help="captures per delay-Doppler block")
     ap.add_argument("--scs-hz", type=float, default=30000.0,
@@ -576,33 +685,71 @@ def main():
               file=sys.stderr)
         return 1
 
+    if args.replay and args.save:
+        print("error: --save writes a fresh trace and cannot be combined "
+              "with --replay", file=sys.stderr)
+        return 1
+
+    if args.replay:
+        source = TraceReplayer(args.replay, args.replay_speed)
+        print(f"[sensing] replaying {args.replay} at speed x{args.replay_speed}",
+              flush=True)
+    else:
+        source = TClient(args.host, args.port, eid, total)
+
+    writer = None
+    if args.save:
+        try:
+            writer = TraceWriter(args.save)
+        except OSError as e:
+            print(f"error: cannot open trace file: {e}", file=sys.stderr)
+            return 1
+        print(f"[sensing] recording to {args.save}", flush=True)
+
     app = SensingApp(M=args.slow_time, db_fmt=fmt, scs_hz=args.scs_hz)
-    client = TClient(args.host, args.port, eid, total)
 
     seen_types = {}
     first_type_report_at = [time.time()]
 
     def rx_loop():
-        for etype, body in client.events():
-            if app.stop.is_set():
-                return
-            if etype == eid:
-                try:
-                    app.handle_event(body)
-                except Exception as e:
-                    print(f"[sensing] handler error: {e}", flush=True)
-            else:
-                seen_types[etype] = seen_types.get(etype, 0) + 1
-                if len(seen_types) == 1 and seen_types[etype] == 1:
-                    print(f"[sensing] first non-target event arrived: etype={etype} "
-                          f"(target {TARGET_EVENT} has id {eid}); "
-                          f"body={len(body)}B", flush=True)
-                now = time.time()
-                if now - first_type_report_at[0] >= 5.0:
-                    first_type_report_at[0] = now
-                    if seen_types:
-                        print(f"[sensing] non-target etypes seen so far: "
-                              f"{sorted(seen_types.items())}", flush=True)
+        nonlocal writer
+        try:
+            for timespec_bytes, etype, body in source.events():
+                if app.stop.is_set():
+                    return
+                if writer is not None:
+                    try:
+                        writer.write(timespec_bytes, etype, body)
+                    except OSError as e:
+                        print(f"[sensing] trace write failed: {e}; "
+                              f"recording disabled", flush=True)
+                        writer.close()
+                        writer = None
+                if etype == eid:
+                    try:
+                        app.handle_event(body)
+                    except Exception as e:
+                        print(f"[sensing] handler error: {e}", flush=True)
+                else:
+                    seen_types[etype] = seen_types.get(etype, 0) + 1
+                    if len(seen_types) == 1 and seen_types[etype] == 1:
+                        print(f"[sensing] first non-target event arrived: etype={etype} "
+                              f"(target {TARGET_EVENT} has id {eid}); "
+                              f"body={len(body)}B", flush=True)
+                    now = time.time()
+                    if now - first_type_report_at[0] >= 5.0:
+                        first_type_report_at[0] = now
+                        if seen_types:
+                            print(f"[sensing] non-target etypes seen so far: "
+                                  f"{sorted(seen_types.items())}", flush=True)
+        finally:
+            if writer is not None:
+                writer.close()
+            if args.replay:
+                # the trace is exhausted; keep the GUI alive so the user can
+                # still inspect the last block, but expect no more updates
+                print("[sensing] end of replay; GUI stays open with the "
+                      "last state (close the window to exit)", flush=True)
 
     t = threading.Thread(target=rx_loop, daemon=True)
     t.start()
