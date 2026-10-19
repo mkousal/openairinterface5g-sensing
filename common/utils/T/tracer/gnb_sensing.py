@@ -472,10 +472,21 @@ class SensingApp:
                 # IFFT of size occ_K along subcarriers (axis 1) -> delay,
                 # DFT of size M along slow-time captures (axis 0) -> Doppler.
                 # No filtering, no clutter removal.
-                dd = np.fft.ifft(u.h_buf, axis=1)     # (M, occ_K)
-                dd = np.fft.fft(dd, axis=0)           # (M, occ_K)
-                dd = np.fft.fftshift(dd, axes=0)      # zero Doppler centered
-                block_db = 20.0 * np.log10(np.abs(dd) + 1e-12)
+                # dd = np.fft.ifft(u.h_buf, axis=1)     # (M, occ_K)
+                # dd = np.fft.fft(dd, axis=0)           # (M, occ_K)
+                # dd = np.fft.fftshift(dd, axes=0)      # zero Doppler centered
+                # block_db = 20.0 * np.log10(np.abs(dd) + 1e-12)
+
+
+                Dr = u.h_buf.transpose()
+                Dr = Dr / np.max(Dr)
+                DFT_Dr = np.fft.fft(Dr, axis=0)
+                DFT_Dr = np.fft.fftshift(DFT_Dr, axes=0)
+                Z = np.fft.ifft(DFT_Dr, axis=1)
+
+                block_db = 20.0 * np.log10(np.abs(Z) + 1e-12)
+
+
                 cof = self.current_ue_key()
                 if cof is not None and self.ues.get(cof) is u:
                     # transpose -> (occ_K, M): rows = delay, cols = Doppler
