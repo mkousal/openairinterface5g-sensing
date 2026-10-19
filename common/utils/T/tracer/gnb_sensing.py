@@ -466,23 +466,16 @@ class SensingApp:
                        if u.srs_period_f > 0 else "unknown")
                 print(f"[sensing] block #{self.blk_count} ready {u.label()}"
                       f"  period={per}", flush=True)
-                # delay-Doppler over the occupied band only:
-                #   IFFT along k (size = occ_K) then FFT along m (size = M).
-                #
-                # Before the slow-time FFT we subtract the per-subcarrier
-                # mean -- this is the classic "clutter rejection" / DC
-                # blocker that removes the LOS path and any stationary
-                # reflector at zero Doppler. Without it the strong static
-                # component dominates the slow-time FFT and the moving
-                # peaks (which is what we usually care about) get buried
-                # in side lobes.
-                h_block = u.h_buf - u.h_buf.mean(axis=0, keepdims=True)
-
-                delay = np.fft.ifft(h_block, axis=1)          # (M, occ_K)
-                dd = np.fft.fft(delay, axis=0)                # (M, occ_K)
-                dd = np.fft.fftshift(dd, axes=0)
-                mag = np.abs(dd).astype(np.float32) ** 2
-                block_db = 10.0 * np.log10(mag + 1e-12)
+                # Simplest DFT-based delay-Doppler estimation
+                # (Sanson et al., Sec. II-B.1 "DFT-Based Method"):
+                #     Z = FFT_m { IFFT_k { Dr[m, k] } }
+                # IFFT of size occ_K along subcarriers (axis 1) -> delay,
+                # DFT of size M along slow-time captures (axis 0) -> Doppler.
+                # No filtering, no clutter removal.
+                dd = np.fft.ifft(u.h_buf, axis=1)     # (M, occ_K)
+                dd = np.fft.fft(dd, axis=0)           # (M, occ_K)
+                dd = np.fft.fftshift(dd, axes=0)      # zero Doppler centered
+                block_db = 20.0 * np.log10(np.abs(dd) + 1e-12)
                 cof = self.current_ue_key()
                 if cof is not None and self.ues.get(cof) is u:
                     # transpose -> (occ_K, M): rows = delay, cols = Doppler
