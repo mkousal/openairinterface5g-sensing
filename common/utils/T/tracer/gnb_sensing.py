@@ -351,6 +351,9 @@ class SensingApp:
         self.current_idx = 0
         self.ev_count = 0
         self.blk_count = 0
+        # rate estimation: snapshot (event count, wall time) at each report
+        self.rate_since_n = 0
+        self.rate_since_t = time.monotonic()
 
         # latest block + axes for the selected UE (None until first block)
         self.latest_dd = None    # (K, M) float dB
@@ -496,7 +499,12 @@ class SensingApp:
                     if u.srs_period_f > 0:
                         t_cap_s = u.srs_period_f * 0.010        # frames -> seconds (10 ms per frame)
                         dop_span = 1.0 / t_cap_s                  # Hz, full unambiguous width
-                        dop_left, dop_right = -dop_span / 2.0, +dop_span / 2.0
+                        dop_res = dop_span / u.M                  # Hz per Doppler bin
+                        # imshow extent = outer pixel edges; bin centers must be
+                        # (-M/2 : M/2-1) * dop_res so zero Doppler is exactly
+                        # on the center of bin M/2
+                        dop_left = -dop_span / 2.0 - dop_res / 2.0
+                        dop_right = +dop_span / 2.0 - dop_res / 2.0
                         self.latest_axes = (delay_tap_s, dop_left, dop_right)
                     else:
                         self.latest_axes = (delay_tap_s, None, None)
@@ -533,9 +541,21 @@ class SensingApp:
 
     def dump_ues(self, reason):
         with self.lock:
+            now = time.monotonic()
+            dt = now - self.rate_since_t
+            dn = self.ev_count - self.rate_since_n
+            self.rate_since_t = now
+            self.rate_since_n = self.ev_count
+            if dt > 0.0:
+                rate = dn / dt
+                gap_ms = dt * 1e3 / dn if dn > 0 else float("inf")
+                rate_s = f"{rate:7.1f} reports/s ({gap_ms:6.1f} ms between reports)"
+            else:
+                rate_s = "n/a"
             cur_key = self.current_ue_key()
             print(f"[sensing] --- UE list ({reason}) --- "
-                  f"tracked={len(self.ue_order)} current_idx={self.current_idx}",
+                  f"tracked={len(self.ue_order)} current_idx={self.current_idx}"
+                  f"  channel-report rate: {rate_s}",
                   flush=True)
             for i, k in enumerate(self.ue_order):
                 u = self.ues[k]
