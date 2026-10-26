@@ -49,8 +49,7 @@
 #include "intertask_interface.h"
 #include "linear_alloc.h"
 #include "ngap_messages_types.h"
-#include "nr_pdcp/nr_pdcp_entity.h"
-#include "nr_pdcp/nr_pdcp_oai_api.h"
+#include "LAYER2/nr_pdcp/nr_pdcp_oai_api.h"
 #include "nr_rrc_defs.h"
 #include "oai_asn1.h"
 #include "openair2/F1AP/f1ap_common.h"
@@ -2032,14 +2031,15 @@ static void handle_ueCapabilityInformation(gNB_RRC_INST *rrc, gNB_RRC_UE_t *UE, 
 
     /* Encode UE-CapabilityRAT-ContainerList for sending to the DU */
     FREE_AND_ZERO_BYTE_ARRAY(UE->ue_cap_buffer);
-    UE->ue_cap_buffer.len = uper_encode_to_new_buffer(&asn_DEF_NR_UE_CapabilityRAT_ContainerList,
+    ssize_t encoded =  uper_encode_to_new_buffer(&asn_DEF_NR_UE_CapabilityRAT_ContainerList,
                                                       NULL,
                                                       ue_CapabilityRAT_ContainerList,
                                                       (void **)&UE->ue_cap_buffer.buf);
-    if (UE->ue_cap_buffer.len <= 0) {
+    if (encoded <= 0) {
       LOG_E(NR_RRC, "could not encode UE-CapabilityRAT-ContainerList, abort handling capabilities\n");
       return;
     }
+    UE->ue_cap_buffer.len = encoded;
     LOG_UE_UL_EVENT(UE, "Received UE capabilities\n");
 
     for (int i = 0; i < ue_CapabilityRAT_ContainerList->list.count; i++) {
@@ -2302,8 +2302,13 @@ static void rrc_gNB_generate_UECapabilityEnquiry(gNB_RRC_INST *rrc, gNB_RRC_UE_t
   T(T_ENB_RRC_UE_CAPABILITY_ENQUIRY, T_INT(rrc->module_id), T_INT(0), T_INT(0), T_INT(ue->rrc_ue_id));
   uint8_t xid = rrc_gNB_get_next_transaction_identifier(rrc->module_id);
   ue->xids[xid] = RRC_UECAPABILITY_ENQUIRY;
-  int size = do_NR_SA_UECapabilityEnquiry(buffer, xid);
-  LOG_I(NR_RRC, "UE %d: Logical Channel DL-DCCH, Generate NR UECapabilityEnquiry (bytes %d, xid %d)\n", ue->rrc_ue_id, size, xid);
+  nr_rrc_cell_container_t *pcell = rrc_get_pcell_for_ue(rrc, ue);
+  DevAssert(pcell != NULL);
+  const int band = pcell->info.mode == NR_MODE_TDD ? pcell->info.tdd.dlul.band : pcell->info.fdd.dl.band;
+
+  int size = do_NR_SA_UECapabilityEnquiry(buffer, xid, band);
+  LOG_I(NR_RRC, "UE %d: Logical Channel DL-DCCH, Generate NR UECapabilityEnquiry for band %d (bytes %d, xid %d)\n", 
+    ue->rrc_ue_id, band, size, xid);
 
   AssertFatal(!NODE_IS_DU(rrc->node_type), "illegal node type DU!\n");
 
