@@ -264,6 +264,13 @@ uint8_t compute_nr_root_seq(NR_RACH_ConfigCommon_t *rach_config,
                             frequency_range_t);
 ssb_ro_preambles_t get_ssb_ro_preambles_4step(struct NR_RACH_ConfigCommon__ssb_perRACH_OccasionAndCB_PreamblesPerSSB *config);
 
+ssb_ro_preambles_t get_ssb_ro_preambles_2step(struct NR_RACH_ConfigCommonTwoStepRA_r16__msgA_SSB_PerRACH_OccasionAndCB_PreamblesPerSSB_r16 *config);
+
+void get_config_index_and_ssb_ro(const NR_MsgA_ConfigCommon_r16_t *msgacc,
+                                 const NR_RACH_ConfigCommon_t *rach_ConfigCommon,
+                                 uint8_t *config_index,
+                                 ssb_ro_preambles_t *ssb_ro);
+
 int ul_ant_bits(NR_DMRS_UplinkConfig_t *NR_DMRS_UplinkConfig, long transformPrecoder);
 
 uint8_t get_pdsch_mcs_table(long *mcs_Table, int dci_format, int rnti_type, int ss_type);
@@ -295,7 +302,7 @@ uint32_t nr_get_code_rate_ul(uint8_t Imcs, uint8_t table_idx);
 int srs_binomial_sum(int count, int Lmax);
 int srs_codebook_nb_res(NR_SRS_Config_t *srs_config);
 int srs_non_codebook_nb_res(NR_SRS_Config_t *srs_config);
-uint16_t get_nr_srs_offset(NR_SRS_PeriodicityAndOffset_t periodicityAndOffset);
+int get_nr_srs_offset(NR_SRS_PeriodicityAndOffset_t periodicityAndOffset);
 void get_monitoring_period_offset(const NR_SearchSpace_t *ss, int *period, int *offset);
 
 uint32_t nr_compute_tbslbrm(uint16_t table,
@@ -358,6 +365,8 @@ void csi_period_offset(const NR_CSI_ReportConfig_t *csirep,
                        int *period,
                        int *offset);
 
+bool is_periodic_occasion(int frame, int slot, int slots_per_frame, int period, int offset);
+
 bool set_dl_ptrs_values(NR_PTRS_DownlinkConfig_t *ptrs_config,
                         uint16_t rbSize, uint8_t mcsIndex, uint8_t mcsTable,
                         uint8_t *K_ptrs, uint8_t *L_ptrs,uint8_t *portIndex,
@@ -386,8 +395,6 @@ uint32_t compute_PDU_length(uint32_t num_TLV, uint32_t total_length);
 rnti_t nr_get_ra_rnti(uint8_t s_id, uint8_t t_id, uint8_t f_id, uint8_t ul_carrier_id);
 
 rnti_t nr_get_MsgB_rnti(uint8_t s_id, uint8_t t_id, uint8_t f_id, uint8_t ul_carrier_id);
-
-bool supported_bw_comparison(int bw_mhz, NR_SupportedBandwidth_t *supported_BW, long *support_90mhz);
 
 int get_FeedbackDisabled(NR_DownlinkHARQ_FeedbackDisabled_r17_t *downlinkHARQ_FeedbackDisabled_r17, int harq_pid);
 

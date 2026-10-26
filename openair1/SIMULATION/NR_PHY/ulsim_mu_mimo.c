@@ -12,15 +12,11 @@
 #include <errno.h>
 #include <bits/getopt_core.h>
 #include "common/utils/nr/nr_common.h"
-#define inMicroS(a) (((double)(a)) / (get_cpu_freq_GHz() * 1000.0))
+#define inMicroS(a) (((double)(a)) / (1000.0))
 #include "SIMULATION/LTE_PHY/common_sim.h"
 #include "common/utils/assertions.h"
 #include "executables/softmodem-common.h"
 #include "NR_BCCH-BCH-Message.h"
-#include "NR_MAC_COMMON/nr_mac.h"
-#include "NR_MAC_COMMON/nr_mac_common.h"
-#include "NR_MAC_UE/mac_defs.h"
-#include "NR_MAC_gNB/nr_mac_gNB.h"
 #include "NR_PHY_INTERFACE/NR_IF_Module.h"
 #include "NR_ReconfigurationWithSync.h"
 #include "NR_ServingCellConfig.h"
@@ -83,7 +79,6 @@ RAN_CONTEXT_t RC;
 char *uecap_file;
 int64_t uplink_frequency_offset[MAX_NUM_CCs][4];
 
-double cpuf;
 // uint8_t nfapi_mode = 0;
 uint64_t downlink_frequency[MAX_NUM_CCs][4];
 THREAD_STRUCT thread_struct;
@@ -196,7 +191,6 @@ int main(int argc, char *argv[])
   double sigma;
   int start_rb = 0;
   int print_perf = 0;
-  cpuf = get_cpu_freq_GHz();
   bool no_phase_pre_comp = false;
   int rv_index = 0;
   float eff_tp_check = 100;
@@ -645,14 +639,16 @@ int main(int argc, char *argv[])
   rnti_t rnti = 0x1234;
   int uid = 0;
   int ssb_index = 0;
-  NR_CellGroupConfig_t *secondaryCellGroup = get_default_secondaryCellGroup(scc, UE_Capability_nr, 0, 1, &conf, cell, uid, ssb_index);
-  secondaryCellGroup->spCellConfig->reconfigurationWithSync = get_reconfiguration_with_sync(rnti, uid, scc, frame);
+  const NR_feature_set_ids_t uecap_fs_ids = {.dl_feature_set_percc_id = 1,
+                                             .ul_feature_set_percc_id = 1};
+  NR_CellGroupConfig_t *scg = get_default_secondaryCellGroup(scc, UE_Capability_nr, &uecap_fs_ids, 0, 1, &conf, cell, uid, ssb_index);
+  scg->spCellConfig->reconfigurationWithSync = get_reconfiguration_with_sync(rnti, uid, scc, frame);
 
   NR_BCCH_BCH_Message_t *mib = get_new_MIB_NR(scc);
 
   // UE dedicated configuration
   for (int u = 0; u < NUM_UE; u++) {
-    nr_mac_add_test_ue(RC.nrmac[0], cell, n_rnti + u, secondaryCellGroup);
+    nr_mac_add_test_ue(RC.nrmac[0], cell, n_rnti + u, scg);
   }
   gNB->frame_parms.nb_antennas_tx = 1;
   gNB->frame_parms.nb_antennas_rx = n_rx;
@@ -679,8 +675,7 @@ int main(int argc, char *argv[])
   for (int i = 0; i < n_rx; ++i)
     rxdata[i] = calloc_or_fail(gNB->frame_parms.samples_per_frame, sizeof(**rxdata));
 
-  NR_BWP_Uplink_t *ubwp =
-      secondaryCellGroup->spCellConfig->spCellConfigDedicated->uplinkConfig->uplinkBWP_ToAddModList->list.array[0];
+  NR_BWP_Uplink_t *ubwp = scg->spCellConfig->spCellConfigDedicated->uplinkConfig->uplinkBWP_ToAddModList->list.array[0];
 
   // Configure channel model
   for (int u = 0; u < NUM_UE; u++) {

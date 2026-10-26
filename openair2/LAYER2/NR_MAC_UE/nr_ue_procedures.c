@@ -17,8 +17,8 @@
 #include "RRC/NR_UE/L2_interface_ue.h"
 
 /* MAC */
-#include "NR_MAC_COMMON/nr_mac.h"
-#include "NR_MAC_UE/mac_proto.h"
+#include "LAYER2/NR_MAC_COMMON/nr_mac.h"
+#include "LAYER2/NR_MAC_UE/mac_proto.h"
 #include "common/utils/nr/nr_common.h"
 #include "openair2/NR_UE_PHY_INTERFACE/NR_Packet_Drop.h"
 
@@ -228,7 +228,7 @@ static void configure_ratematching_csi(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsc
       AssertFatal(zp_res->periodicityAndOffset, "periodicityAndOffset cannot be null for periodic ZP resource\n");
       int period, offset;
       csi_period_offset(NULL, zp_res->periodicityAndOffset, &period, &offset);
-      if((frame * slots_per_frame + slot - offset) % period != 0)
+      if (!is_periodic_occasion(frame, slot, slots_per_frame, period, offset))
         continue;
       AssertFatal(dlsch_pdu->numCsiRsForRateMatching < NFAPI_MAX_NUM_CSI_RATEMATCH, "csiRsForRateMatching out of bounds\n");
       fapi_nr_dl_config_csirs_pdu_rel15_t *csi_pdu = &dlsch_pdu->csiRsForRateMatching[dlsch_pdu->numCsiRsForRateMatching];
@@ -246,7 +246,7 @@ static void configure_ratematching_csi(fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsc
       if (nzp_res->periodicityAndOffset) {
         int period, offset;
         csi_period_offset(NULL, nzp_res->periodicityAndOffset, &period, &offset);
-        if ((frame * slots_per_frame + slot - offset) % period != 0)
+        if (!is_periodic_occasion(frame, slot, slots_per_frame, period, offset))
           continue;
         AssertFatal(dlsch_pdu->numCsiRsForRateMatching < NFAPI_MAX_NUM_CSI_RATEMATCH, "csiRsForRateMatching out of bounds\n");
         fapi_nr_dl_config_csirs_pdu_rel15_t *csi_pdu = &dlsch_pdu->csiRsForRateMatching[dlsch_pdu->numCsiRsForRateMatching];
@@ -1136,11 +1136,11 @@ static int nr_ue_process_dci_dl_10(NR_UE_MAC_INST_t *mac,
     return -1;
   }
 
-  // Sanity check for pucch_resource_indicator value received to check for false DCI.
-  bool valid = false;
+  // SI-RNTI and RA-RNTI DCI 1_0 do not carry a PUCCH resource indicator.
+  bool valid = rnti_type == TYPE_SI_RNTI_ || rnti_type == TYPE_RA_RNTI_;
   NR_PUCCH_Config_t *pucch_Config = mac->current_UL_BWP ? mac->current_UL_BWP->pucch_Config : NULL;
 
-  if (pucch_Config && pucch_Config->resourceSetToAddModList) {
+  if (!valid && pucch_Config && pucch_Config->resourceSetToAddModList) {
     int pucch_res_set_cnt = pucch_Config->resourceSetToAddModList->list.count;
     for (int id = 0; id < pucch_res_set_cnt; id++) {
       if (dci->pucch_resource_indicator < pucch_Config->resourceSetToAddModList->list.array[id]->resourceList.list.count) {
@@ -2755,7 +2755,7 @@ int nr_get_csi_measurements(NR_UE_MAC_INST_t *mac,
     csi_period_offset(csirep, NULL, &period, &offset);
     const int n_slots_frame = mac->frame_structure.numb_slots_frame;
     // Check if current slot falls in the report period
-    if (((n_slots_frame * frame + slot - offset) % period) != 0)
+    if (!is_periodic_occasion(frame, slot, n_slots_frame, period, offset))
       continue;
 
     int csi_res_id = -1;

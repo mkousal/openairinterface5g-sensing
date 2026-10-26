@@ -8,7 +8,7 @@
 
 #include "PHY/defs_nr_UE.h"
 #include "NR_IF_Module.h"
-#include "NR_MAC_UE/mac_proto.h"
+#include "LAYER2/NR_MAC_UE/mac_proto.h"
 #include "assertions.h"
 #include "SCHED_NR_UE/fapi_nr_ue_l1.h"
 #include "bits.h"
@@ -151,7 +151,7 @@ static nr_dci_format_t handle_dci(NR_UE_MAC_INST_t *mac, frame_t frame, int slot
   // if notification of a reception of a PDCCH transmission of the SpCell is received from lower layers
   // if the C-RNTI MAC CE was included in Msg3
   // consider this Contention Resolution successful
-  if (mac->msg3_C_RNTI && mac->ra.ra_state == nrRA_WAIT_CONTENTION_RESOLUTION)
+  if (mac->msg3_C_RNTI && mac->ra.ra_state == nrRA_WAIT_CONTENTION_RESOLUTION && dci->rnti == mac->crnti)
     nr_ra_succeeded(mac, frame, slot);
 
   // suspend RAR response window timer
